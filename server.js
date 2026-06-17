@@ -1,12 +1,10 @@
 const express = require("express");
-const { WebcastPushConnection } = require("tiktok-live-connector");
+const TikTokLive = require("tiktok-live-connector");
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-
-// CAMBIA ESTO POR TU USUARIO DE TIKTOK
 const TIKTOK_USERNAME = "TU_USUARIO";
 
 let events = [];
@@ -23,62 +21,21 @@ function addEvent(type, data) {
     }
 }
 
-const tiktokLive = new WebcastPushConnection(TIKTOK_USERNAME);
+console.log("TikTok Connector:", TikTokLive);
 
-tiktokLive.connect()
-    .then(() => {
-        console.log("Conectado al live");
-    })
-    .catch(console.error);
-
-// FOLLOW
-tiktokLive.on("follow", (data) => {
-    addEvent("follow", {
-        user: data.uniqueId
+app.get("/", (req, res) => {
+    res.json({
+        online: true,
+        username: TIKTOK_USERNAME,
+        pendingEvents: events.length
     });
 });
 
-// LIKE
-tiktokLive.on("like", (data) => {
-    addEvent("like", {
-        user: data.uniqueId,
-        totalLikes: data.totalLikeCount
-    });
-});
-
-// COMENTARIO
-tiktokLive.on("chat", (data) => {
-    addEvent("chat", {
-        user: data.uniqueId,
-        message: data.comment
-    });
-});
-
-// REGALO
-tiktokLive.on("gift", (data) => {
-    addEvent("gift", {
-        user: data.uniqueId,
-        giftId: data.giftId,
-        giftName: data.giftName,
-        repeatCount: data.repeatCount
-    });
-});
-
-// Obtener todos los eventos pendientes
 app.get("/events", (req, res) => {
     res.json(events);
     events = [];
 });
 
-// Estado
-app.get("/", (req, res) => {
-    res.json({
-        online: true,
-        connectedTo: TIKTOK_USERNAME,
-        pendingEvents: events.length
-    });
-});
-
 app.listen(PORT, () => {
-    console.log(`API iniciada en puerto ${PORT}`);
+    console.log(`Servidor iniciado en puerto ${PORT}`);
 });
