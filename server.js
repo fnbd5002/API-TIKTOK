@@ -1,41 +1,47 @@
 const express = require("express");
-const TikTokLive = require("tiktok-live-connector");
-
 const app = express();
+
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const TIKTOK_USERNAME = "TU_USUARIO";
+let currentUser = null;
 
-let events = [];
+app.post("/setuser", async (req, res) => {
+    const username = req.body.username;
 
-function addEvent(type, data) {
-    events.push({
-        type,
-        timestamp: Date.now(),
-        data
-    });
-
-    if (events.length > 100) {
-        events.shift();
+    if (!username) {
+        return res.status(400).json({
+            success: false
+        });
     }
-}
 
-console.log("TikTok Connector:", TikTokLive);
+    try {
+        // desconectar conexión anterior
+        if (currentUser?.disconnect) {
+            currentUser.disconnect();
+        }
 
-app.get("/", (req, res) => {
+        // aquí crearías la nueva conexión TikTok
+        currentUser = {
+            username
+        };
+
+        res.json({
+            success: true,
+            username
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+    }
+});
+
+app.get("/status", (req, res) => {
     res.json({
-        online: true,
-        username: TIKTOK_USERNAME,
-        pendingEvents: events.length
+        username: currentUser?.username || null
     });
 });
 
-app.get("/events", (req, res) => {
-    res.json(events);
-    events = [];
-});
-
-app.listen(PORT, () => {
-    console.log(`Servidor iniciado en puerto ${PORT}`);
-});
+app.listen(process.env.PORT || 3000);
