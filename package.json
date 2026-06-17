@@ -1,7 +1,7 @@
 {
   "name": "tiktok-live-roblox-api",
   "version": "1.0.0",
-  "description": "API en Node.js que escucha eventos de TikTok Live (nuevos seguidores, rosas, donaciones/regalos) y los expone por HTTP para que Roblox Studio los consuma.",
+  "description": "API en Node.js que escucha eventos de TikTok Live (nuevos seguidores, rosas, donaciones/regalos) vía Tik.Tools y los expone por HTTP para que Roblox Studio los consuma.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,7 +12,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "tiktok-live-connector": "^2.4.0"
+    "ws": "^8.18.2"
   },
   "license": "MIT"
 }
