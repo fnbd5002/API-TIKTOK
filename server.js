@@ -1,15 +1,13 @@
 const express = require("express");
 const app = express();
 
+const TikTok = require("tiktok-live-connector");
+
+console.log("TIKTOK MODULE:");
+console.log(TikTok);
+
 app.get("/", (req, res) => {
     res.send("API FUNCIONANDO");
-});
-
-app.get("/event", (req, res) => {
-    res.json({
-        success: true,
-        message: "event endpoint funcionando"
-    });
 });
 
 const PORT = process.env.PORT || 3000;
