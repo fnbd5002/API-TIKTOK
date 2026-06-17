@@ -1,12 +1,7 @@
 {
-  "name": "tiktok-roblox-api",
-  "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
   "dependencies": {
-    "express": "^4.21.2",
-    "tiktok-live-connector": "^1.2.2"
+    "express": "^5.0.0",
+    "tiktok-live-connector": "^2.0.0"
   }
 }
