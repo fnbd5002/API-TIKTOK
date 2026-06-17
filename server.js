@@ -130,7 +130,20 @@ async function getJwt(username) {
  * Procesa cada mensaje que llega por el WebSocket y lo clasifica en
  * follow / rose / donation, igual que antes.
  */
+// Guarda los últimos mensajes crudos que llegan del WebSocket, sin filtrar,
+// para poder diagnosticar qué está enviando realmente Tik.Tools.
+let rawMessageLog = [];
+const MAX_RAW_LOG = 30;
+
+function logRawMessage(raw) {
+  rawMessageLog.push({ timestamp: Date.now(), raw: raw.slice(0, 2000) });
+  if (rawMessageLog.length > MAX_RAW_LOG) {
+    rawMessageLog = rawMessageLog.slice(rawMessageLog.length - MAX_RAW_LOG);
+  }
+}
+
 function handleMessage(raw) {
+  logRawMessage(raw);
   let e;
   try {
     e = JSON.parse(raw);
@@ -307,6 +320,15 @@ app.get("/status", (req, res) => {
 
 app.get("/stats", (req, res) => {
   res.json(stats);
+});
+
+app.get("/debug/raw", (req, res) => {
+  res.json({
+    isConnected,
+    connectedUsername,
+    totalRawMessages: rawMessageLog.length,
+    messages: rawMessageLog,
+  });
 });
 
 app.get("/events", (req, res) => {
