@@ -1,20 +1,24 @@
 import express from "express";
-import { WebcastPushConnection } from "tiktok-live-connector";
+import { TikTokLiveConnection } from "tiktok-live-connector";
 
 const app = express();
 
 let tiktok = null;
 let ultimoEvento = {};
 
-app.get("/connect/:username", async (req, res) => {
-    const username = req.params.username;
+app.get("/", (req, res) => {
+    res.send("API funcionando");
+});
 
+app.get("/connect/:username", async (req, res) => {
     try {
+        const username = req.params.username;
+
         if (tiktok) {
             tiktok.disconnect();
         }
 
-        tiktok = new WebcastPushConnection(username);
+        tiktok = new TikTokLiveConnection(username);
 
         tiktok.on("follow", (data) => {
             ultimoEvento = {
@@ -39,6 +43,8 @@ app.get("/connect/:username", async (req, res) => {
         });
 
     } catch (err) {
+        console.error(err);
+
         res.status(500).json({
             success: false,
             error: err.message
@@ -50,4 +56,8 @@ app.get("/eventos", (req, res) => {
     res.json(ultimoEvento);
 });
 
-app.listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+    console.log(`Servidor iniciado en puerto ${PORT}`);
+});
