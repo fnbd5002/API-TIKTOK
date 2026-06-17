@@ -1,9 +1,13 @@
 {
   "name": "tiktok-roblox-api",
   "version": "1.0.0",
+  "description": "TikTok Live API para Roblox",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": "20.x"
   },
   "dependencies": {
     "express": "^4.19.2",
