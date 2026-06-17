@@ -2,37 +2,52 @@ import express from "express";
 import { WebcastPushConnection } from "tiktok-live-connector";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-const tiktok = new WebcastPushConnection("TU_USUARIO");
-
+let tiktok = null;
 let ultimoEvento = {};
 
-tiktok.on("follow", (data) => {
-    ultimoEvento = {
-        tipo: "follow",
-        usuario: data.uniqueId
-    };
-});
+app.get("/connect/:username", async (req, res) => {
+    const username = req.params.username;
 
-tiktok.on("gift", (data) => {
-    ultimoEvento = {
-        tipo: "gift",
-        usuario: data.uniqueId,
-        regalo: data.giftName
-    };
-});
+    try {
+        if (tiktok) {
+            tiktok.disconnect();
+        }
 
-tiktok.connect();
+        tiktok = new WebcastPushConnection(username);
 
-app.get("/", (req, res) => {
-    res.send("API funcionando");
+        tiktok.on("follow", (data) => {
+            ultimoEvento = {
+                tipo: "follow",
+                usuario: data.uniqueId
+            };
+        });
+
+        tiktok.on("gift", (data) => {
+            ultimoEvento = {
+                tipo: "gift",
+                usuario: data.uniqueId,
+                regalo: data.giftName
+            };
+        });
+
+        await tiktok.connect();
+
+        res.json({
+            success: true,
+            conectadoA: username
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+    }
 });
 
 app.get("/eventos", (req, res) => {
     res.json(ultimoEvento);
 });
 
-app.listen(PORT, () => {
-    console.log(`Servidor iniciado en ${PORT}`);
-});
+app.listen(process.env.PORT || 3000);
