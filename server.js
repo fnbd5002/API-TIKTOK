@@ -2,7 +2,7 @@
  * server.js
  * -------------------------------------------------------------
  * API sencilla en Node.js + Express que se conecta a un live de
- * TikTok (usando la librería "tiktok-live-connector") y escucha:
+ * TikTok (usando la librería "tiktok-live-connector" v2.x) y escucha:
  *
  *   - Nuevos seguidores      -> evento "follow"
  *   - Rosas donadas          -> evento "rose"   (regalo "Rose"/"Rosa")
@@ -16,12 +16,18 @@
  *      y recibe solo los eventos nuevos.
  *
  * Pensado para desplegarse en Render (usa process.env.PORT).
+ *
+ * NOTA DE LA VERSIÓN: a partir de tiktok-live-connector v2.x la clase
+ * principal se renombró de "WebcastPushConnection" a
+ * "TikTokLiveConnection", y algunos campos de los eventos se movieron
+ * (por ejemplo, antes "data.uniqueId" ahora es "data.user.uniqueId").
+ * Este archivo ya está actualizado a esa versión.
  * -------------------------------------------------------------
  */
 
 const express = require("express");
 const cors = require("cors");
-const { WebcastPushConnection } = require("tiktok-live-connector");
+const { TikTokLiveConnection } = require("tiktok-live-connector");
 
 const app = express();
 app.use(cors());
@@ -69,6 +75,32 @@ function pushEvent(type, data) {
 }
 
 /**
+ * Extrae uniqueId/nickname de forma segura. En v2.x estos datos vienen
+ * anidados dentro de "data.user", a diferencia de v1.x donde estaban
+ * directo en "data".
+ */
+function getUserFields(data) {
+  const user = data.user || {};
+  return {
+    uniqueId: user.uniqueId || data.uniqueId || "desconocido",
+    nickname: user.nickname || data.nickname || "desconocido",
+  };
+}
+
+/**
+ * Extrae los datos del regalo de forma segura. En v2.x viven dentro de
+ * "data.gift" (nombre, tipo, diamantes), no sueltos en "data".
+ */
+function getGiftFields(data) {
+  const gift = data.gift || {};
+  return {
+    giftName: gift.name || data.giftName || "Desconocido",
+    giftType: gift.type ?? data.giftType ?? 0,
+    diamondCount: gift.diamondCount ?? data.diamondCount ?? 0,
+  };
+}
+
+/**
  * Conecta (o reconecta) a un usuario de TikTok que esté en vivo
  * y registra los listeners de los eventos que nos interesan.
  */
@@ -81,8 +113,8 @@ async function connectToTikTok(username) {
     }
   }
 
-  tiktokConnection = new WebcastPushConnection(username, {
-    // opciones por defecto; se pueden ajustar si hace falta
+  // v2.x requiere pasar un objeto de opciones (puede ir vacío {}).
+  tiktokConnection = new TikTokLiveConnection(username, {
     enableExtendedGiftInfo: true,
   });
 
@@ -96,48 +128,40 @@ async function connectToTikTok(username) {
 
   // ---- Nuevos seguidores ----
   tiktokConnection.on("follow", (data) => {
+    const { uniqueId, nickname } = getUserFields(data);
     stats.totalFollowers += 1;
-    pushEvent("follow", {
-      uniqueId: data.uniqueId,
-      nickname: data.nickname,
-    });
+    pushEvent("follow", { uniqueId, nickname });
   });
 
   // ---- Regalos (rosas y otras donaciones) ----
   tiktokConnection.on("gift", (data) => {
+    const { giftName, giftType, diamondCount: diamondsPerUnit } = getGiftFields(data);
+    const { uniqueId, nickname } = getUserFields(data);
+
     // Los regalos "streakables" (giftType === 1) se disparan varias
     // veces mientras el usuario mantiene presionado el botón.
     // Solo contamos cuando termina el streak (repeatEnd) para no
     // duplicar el conteo. Los regalos no-streakables se cuentan al toque.
-    if (data.giftType === 1 && !data.repeatEnd) {
+    if (giftType === 1 && !data.repeatEnd) {
       return;
     }
 
     const repeatCount = data.repeatCount || 1;
-    const diamondCount = (data.diamondCount || 0) * repeatCount;
-    const giftName = data.giftName || "Desconocido";
+    const diamondCount = diamondsPerUnit * repeatCount;
 
     stats.totalDonations += 1;
     stats.totalDiamonds += diamondCount;
 
     const esRosa =
-      data.giftId === 5655 || giftName.toLowerCase().includes("rose") || giftName.toLowerCase().includes("rosa");
+      String(data.giftId) === "5655" ||
+      giftName.toLowerCase().includes("rose") ||
+      giftName.toLowerCase().includes("rosa");
 
     if (esRosa) {
       stats.totalRoses += repeatCount;
-      pushEvent("rose", {
-        uniqueId: data.uniqueId,
-        nickname: data.nickname,
-        count: repeatCount,
-      });
+      pushEvent("rose", { uniqueId, nickname, count: repeatCount });
     } else {
-      pushEvent("donation", {
-        uniqueId: data.uniqueId,
-        nickname: data.nickname,
-        giftName,
-        diamondCount,
-        repeatCount,
-      });
+      pushEvent("donation", { uniqueId, nickname, giftName, diamondCount, repeatCount });
     }
   });
 
