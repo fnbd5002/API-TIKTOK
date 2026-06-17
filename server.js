@@ -2,10 +2,12 @@
  * server.js
  * -------------------------------------------------------------
  * API sencilla en Node.js + Express que se conecta a un live de
- * TikTok (usando la librería "tiktok-live-connector" v2.x) y escucha:
+ * TikTok usando Tik.Tools (https://tik.tools) -- un servicio de
+ * terceros NO afiliado a TikTok, con un nivel gratuito real (sin
+ * tarjeta de crédito) -- y escucha:
  *
  *   - Nuevos seguidores      -> evento "follow"
- *   - Rosas donadas          -> evento "rose"   (regalo "Rose"/"Rosa")
+ *   - Rosas donadas          -> evento "rose"   (regalo "Rose")
  *   - Otras donaciones/regalos -> evento "donation"
  *
  * Roblox Studio NO puede recibir "push" (no es un servidor), así
@@ -15,19 +17,29 @@
  *   2) Roblox llama cada X segundos a GET /events?since=<ultimoId>
  *      y recibe solo los eventos nuevos.
  *
- * Pensado para desplegarse en Render (usa process.env.PORT).
+ * CÓMO FUNCIONA TIK.TOOLS:
+ *   1) POST /authentication/jwt con tu apiKey -> te da un token JWT
+ *      de corta duración para un usuario de TikTok específico.
+ *   2) Te conectas a un WebSocket con ese token y recibes eventos
+ *      en tiempo real: chat, gift, like, follow, share, etc.
+ *   3) El plan gratis ("Sandbox") permite sesiones de hasta 2 horas;
+ *      por eso este archivo reconecta automáticamente cuando el
+ *      WebSocket se cierra.
  *
- * NOTA DE LA VERSIÓN: a partir de tiktok-live-connector v2.x la clase
- * principal se renombró de "WebcastPushConnection" a
- * "TikTokLiveConnection", y algunos campos de los eventos se movieron
- * (por ejemplo, antes "data.uniqueId" ahora es "data.user.uniqueId").
- * Este archivo ya está actualizado a esa versión.
+ * Para obtener tu propia clave gratuita (recomendado en vez de la
+ * clave de demostración pública, que tiene límites mucho más bajos):
+ *   1) Entra a https://tik.tools/login e inicia sesión con Google.
+ *   2) Copia tu API key del dashboard.
+ *   3) En Render, agrega la variable de entorno TIKTOOL_API_KEY con
+ *      esa clave.
+ *
+ * Pensado para desplegarse en Render (usa process.env.PORT).
  * -------------------------------------------------------------
  */
 
 const express = require("express");
 const cors = require("cors");
-const { TikTokLiveConnection } = require("tiktok-live-connector");
+const WebSocket = require("ws");
 
 const app = express();
 app.use(cors());
@@ -35,20 +47,29 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+const TIKTOOL_API = "https://api.tik.tools";
+const TIKTOOL_WS = "wss://api.tik.tools";
+
+// La clave de demostración pública ("your_api_key") funciona SIN registrarte,
+// pero con límites muy bajos (sesiones de 10 min). Para uso real, consigue tu
+// propia clave gratis en https://tik.tools/login y ponla en la variable de
+// entorno TIKTOOL_API_KEY.
+const TIKTOOL_API_KEY = process.env.TIKTOOL_API_KEY || "your_api_key";
+
 // -----------------------------------------------------------------
 // Estado global de la conexión a TikTok
 // -----------------------------------------------------------------
-let tiktokConnection = null;
+let ws = null;
 let connectedUsername = null;
-let roomId = null;
 let isConnected = false;
+let reconnectTimer = null;
 
 // Cola de eventos en memoria (lo que Roblox va a leer)
 let eventQueue = [];
 let nextEventId = 1;
-const MAX_QUEUE_LENGTH = 1000; // evita que crezca infinito si nadie hace polling
+const MAX_QUEUE_LENGTH = 1000;
 
-// Contadores acumulados (útiles para mostrar totales en Roblox)
+// Contadores acumulados
 const stats = {
   totalFollowers: 0,
   totalRoses: 0,
@@ -56,9 +77,6 @@ const stats = {
   totalDiamonds: 0,
 };
 
-/**
- * Agrega un evento a la cola y recorta la cola si es muy larga.
- */
 function pushEvent(type, data) {
   const event = {
     id: nextEventId++,
@@ -74,86 +92,83 @@ function pushEvent(type, data) {
   return event;
 }
 
-/**
- * Extrae uniqueId/nickname de forma segura. En v2.x estos datos vienen
- * anidados dentro de "data.user", a diferencia de v1.x donde estaban
- * directo en "data".
- */
 function getUserFields(data) {
   const user = data.user || {};
   return {
-    uniqueId: user.uniqueId || data.uniqueId || "desconocido",
-    nickname: user.nickname || data.nickname || "desconocido",
+    uniqueId: user.uniqueId || "desconocido",
+    nickname: user.nickname || user.uniqueId || "desconocido",
   };
 }
 
 /**
- * Extrae los datos del regalo de forma segura. En v2.x viven dentro de
- * "data.gift" (nombre, tipo, diamantes), no sueltos en "data".
+ * Pide un token JWT de corta duración para conectarse al live de
+ * un usuario específico.
  */
-function getGiftFields(data) {
-  const gift = data.gift || {};
-  return {
-    giftName: gift.name || data.giftName || "Desconocido",
-    giftType: gift.type ?? data.giftType ?? 0,
-    diamondCount: gift.diamondCount ?? data.diamondCount ?? 0,
-  };
-}
-
-/**
- * Conecta (o reconecta) a un usuario de TikTok que esté en vivo
- * y registra los listeners de los eventos que nos interesan.
- */
-async function connectToTikTok(username) {
-  if (tiktokConnection) {
-    try {
-      tiktokConnection.disconnect();
-    } catch (err) {
-      // ignorar errores al desconectar la sesión anterior
-    }
-  }
-
-  // v2.x requiere pasar un objeto de opciones (puede ir vacío {}).
-  tiktokConnection = new TikTokLiveConnection(username, {
-    enableExtendedGiftInfo: true,
+async function getJwt(username) {
+  const res = await fetch(`${TIKTOOL_API}/authentication/jwt?apiKey=${encodeURIComponent(TIKTOOL_API_KEY)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      allowed_creators: [username],
+      expire_after: 7000, // ~2 horas, el máximo del plan gratis
+      max_websockets: 1,
+    }),
   });
 
-  const state = await tiktokConnection.connect();
+  const json = await res.json().catch(() => null);
 
-  connectedUsername = username;
-  roomId = state.roomId;
-  isConnected = true;
+  if (!res.ok || !json || !json.data || !json.data.token) {
+    throw new Error(
+      `No se pudo obtener token para @${username} (HTTP ${res.status}): ${JSON.stringify(json)}`
+    );
+  }
 
-  console.log(`Conectado al live de @${username} (roomId: ${roomId})`);
+  return json.data.token;
+}
 
-  // ---- Nuevos seguidores ----
-  tiktokConnection.on("follow", (data) => {
+/**
+ * Procesa cada mensaje que llega por el WebSocket y lo clasifica en
+ * follow / rose / donation, igual que antes.
+ */
+function handleMessage(raw) {
+  let e;
+  try {
+    e = JSON.parse(raw);
+  } catch (err) {
+    return;
+  }
+
+  if (!e || !e.event || e.event === "roomInfo") {
+    return;
+  }
+
+  const data = e.data || {};
+
+  if (e.event === "follow") {
     const { uniqueId, nickname } = getUserFields(data);
     stats.totalFollowers += 1;
     pushEvent("follow", { uniqueId, nickname });
-  });
+    return;
+  }
 
-  // ---- Regalos (rosas y otras donaciones) ----
-  tiktokConnection.on("gift", (data) => {
-    const { giftName, giftType, diamondCount: diamondsPerUnit } = getGiftFields(data);
-    const { uniqueId, nickname } = getUserFields(data);
-
-    // Los regalos "streakables" (giftType === 1) se disparan varias
-    // veces mientras el usuario mantiene presionado el botón.
-    // Solo contamos cuando termina el streak (repeatEnd) para no
-    // duplicar el conteo. Los regalos no-streakables se cuentan al toque.
-    if (giftType === 1 && !data.repeatEnd) {
+  if (e.event === "gift") {
+    // Los regalos en racha (combo) reenvían el mismo evento varias veces
+    // con repeatEnd:false hasta que el usuario suelta el botón. Esperamos
+    // a repeatEnd:true para contar el total final, igual que antes.
+    if (data.repeatEnd === false) {
       return;
     }
 
+    const { uniqueId, nickname } = getUserFields(data);
+    const giftName = data.giftName || "Desconocido";
     const repeatCount = data.repeatCount || 1;
-    const diamondCount = diamondsPerUnit * repeatCount;
+    const diamondCount = (data.diamondCount || 0) * repeatCount;
 
     stats.totalDonations += 1;
     stats.totalDiamonds += diamondCount;
 
     const esRosa =
-      String(data.giftId) === "5655" ||
+      Number(data.giftId) === 5655 ||
       giftName.toLowerCase().includes("rose") ||
       giftName.toLowerCase().includes("rosa");
 
@@ -163,37 +178,107 @@ async function connectToTikTok(username) {
     } else {
       pushEvent("donation", { uniqueId, nickname, giftName, diamondCount, repeatCount });
     }
-  });
+  }
+}
 
-  // ---- Manejo de desconexión del stream ----
-  tiktokConnection.on("streamEnd", () => {
-    console.log(`El live de @${username} terminó.`);
-    isConnected = false;
-  });
+/**
+ * Conecta (o reconecta) al live de un usuario de TikTok.
+ * Se reconecta solo cuando el WebSocket se cierra (las sesiones del
+ * plan gratis duran máximo ~2 horas).
+ */
+function connectToTikTok(username) {
+  return new Promise(async (resolve, reject) => {
+    if (ws) {
+      try {
+        ws.removeAllListeners();
+        ws.close();
+      } catch (err) {
+        // ignorar
+      }
+      ws = null;
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
 
-  tiktokConnection.on("disconnected", () => {
-    isConnected = false;
-  });
+    let token;
+    try {
+      token = await getJwt(username);
+    } catch (err) {
+      return reject(err);
+    }
 
-  return state;
+    connectedUsername = username;
+    ws = new WebSocket(`${TIKTOOL_WS}?uniqueId=${encodeURIComponent(username)}&jwtKey=${encodeURIComponent(token)}`);
+
+    let settled = false;
+
+    ws.on("open", () => {
+      isConnected = true;
+      settled = true;
+      console.log(`Conectado al live de @${username}`);
+      resolve({ username });
+    });
+
+    ws.on("message", (raw) => handleMessage(raw.toString()));
+
+    ws.on("close", (code, reason) => {
+      isConnected = false;
+      console.log(`Conexión cerrada con @${username} (code ${code}): ${reason}`);
+
+      // Reconectar automáticamente si seguimos "queriendo" este usuario
+      // (es decir, no se llamó a /disconnect mientras tanto).
+      if (connectedUsername === username) {
+        reconnectTimer = setTimeout(() => {
+          connectToTikTok(username).catch((err) =>
+            console.error(`Error al reconectar a @${username}:`, err.message)
+          );
+        }, 3000);
+      }
+    });
+
+    ws.on("error", (err) => {
+      console.error("Error de WebSocket:", err.message);
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+  });
+}
+
+function disconnectFromTikTok() {
+  connectedUsername = null;
+  isConnected = false;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (ws) {
+    try {
+      ws.removeAllListeners();
+      ws.close();
+    } catch (err) {
+      // ignorar
+    }
+    ws = null;
+  }
 }
 
 // -----------------------------------------------------------------
 // Rutas de la API
 // -----------------------------------------------------------------
 
-// Salud / info básica
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    mensaje: "TikTok Live -> Roblox API funcionando",
+    mensaje: "TikTok Live -> Roblox API funcionando (vía Tik.Tools)",
     conectado: isConnected,
     usuario: connectedUsername,
   });
 });
 
-// Iniciar conexión con un usuario de TikTok que esté en vivo
-// Body: { "username": "nombre_de_usuario" }
 app.post("/connect", async (req, res) => {
   const { username } = req.body;
   if (!username) {
@@ -201,38 +286,29 @@ app.post("/connect", async (req, res) => {
   }
 
   try {
-    const state = await connectToTikTok(username);
-    res.json({ ok: true, mensaje: `Conectado a @${username}`, roomId: state.roomId });
+    await connectToTikTok(username);
+    res.json({ ok: true, mensaje: `Conectado a @${username}` });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Desconectar
 app.post("/disconnect", (req, res) => {
-  if (tiktokConnection) {
-    tiktokConnection.disconnect();
-  }
-  isConnected = false;
+  disconnectFromTikTok();
   res.json({ ok: true, mensaje: "Desconectado" });
 });
 
-// Estado actual de la conexión
 app.get("/status", (req, res) => {
   res.json({
     conectado: isConnected,
     usuario: connectedUsername,
-    roomId,
   });
 });
 
-// Totales acumulados (seguidores, rosas, donaciones)
 app.get("/stats", (req, res) => {
   res.json(stats);
 });
 
-// Eventos nuevos desde un id dado. Roblox debe llamar esto en bucle.
-// Ejemplo: GET /events?since=0
 app.get("/events", (req, res) => {
   const since = parseInt(req.query.since || "0", 10);
   const nuevos = eventQueue.filter((e) => e.id > since);
@@ -250,8 +326,6 @@ app.get("/events", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en el puerto ${PORT}`);
 
-  // Si se define la variable de entorno TIKTOK_USERNAME en Render,
-  // la API se conecta automáticamente al arrancar.
   if (process.env.TIKTOK_USERNAME) {
     connectToTikTok(process.env.TIKTOK_USERNAME)
       .then(() => console.log(`Auto-conectado a @${process.env.TIKTOK_USERNAME}`))
