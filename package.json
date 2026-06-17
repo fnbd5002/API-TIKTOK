@@ -7,6 +7,6 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "tiktok-live-connector": "^2.0.6"
+    "tiktok-live-connector": "^1.2.2"
   }
 }
