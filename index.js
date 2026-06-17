@@ -1,5 +1,7 @@
 import express from "express";
-import { WebcastPushConnection } from "tiktok-live-connector";
+const { WebcastPushConnection } = await import("tiktok-live-connector");
+
+
 
 const app = express();
 
